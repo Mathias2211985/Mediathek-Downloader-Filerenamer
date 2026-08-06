@@ -1,0 +1,32 @@
+# ── Persönliche Konfiguration ────────────────────────────────────────────────
+# Enthält API-Schlüssel, Ordnerpfade und die Watchlist – NIEMALS veröffentlichen
+watchlist.json
+watchlist.json.bak-*
+downloaded_hashes.txt
+
+# ── Nicht Teil dieses Repos ─────────────────────────────────────────────────
+# Server-Variante für den Raspberry Pi – eigener Entwicklungsstand,
+# kann nur Suche/Download/Watchlist. Wird hier bewusst nicht veröffentlicht.
+mediathek_server.py
+test_mediathek.py
+
+# ── Diagnose-Ausgaben (enthalten Dateinamen aus der eigenen Bibliothek) ──────
+tvdb_match_debug.txt
+tmdb_match_debug.txt
+*.log
+
+# ── Build-Artefakte ─────────────────────────────────────────────────────────
+build/
+dist/
+*.exe
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── Editor / System ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+desktop.ini
+Thumbs.db
+.DS_Store

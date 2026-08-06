@@ -1,0 +1,37 @@
+{
+  "_hinweis": "Kopiere diese Datei nach watchlist.json und trage deine Werte ein. API-Schlüssel lassen sich auch bequem im Programm unter 'Umbenennen → ⚙ API & Format' eintragen.",
+
+  "tvdb_api_key": "",
+  "tmdb_api_key": "",
+  "trakt_client_id": "",
+  "omdb_api_key": "",
+
+  "series_source": "TheTVDB",
+  "movie_source": "TheMovieDB",
+  "tvdb_lang": "deu",
+  "tmdb_lang": "de",
+  "tvdb_order": "official",
+  "tvdb_fmt": "{serie} - S{s:02d}E{e:02d} - {titel}.mp4",
+  "tmdb_fmt": "{titel} ({jahr}).mp4",
+
+  "folder": "D:/Downloads",
+  "scan_series_folder": "",
+  "scan_movie_folder": "",
+  "sort_dest_folder": "",
+  "movie_dest_folder": "",
+
+  "sort_season_fmt": "Staffel {s:02d}",
+  "folder_append_id": true,
+  "movie_group_mode": "none",
+  "movie_subfolder": true,
+  "sort_prune_empty": true,
+  "sort_exist_action": "ask",
+  "sort_aliases": {},
+  "series_id_map": {},
+
+  "auto_check_on_start": true,
+  "filter_access": true,
+  "series_fmt": true,
+  "subtitles": false,
+  "entries": []
+}

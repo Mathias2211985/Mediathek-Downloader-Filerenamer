@@ -364,15 +364,22 @@ _EP_PATTERNS = [
     r'\bTeil[\s._]+(\d{1,4})\b',                # Teil 3 / Teil.3
     r'\b(\d{1,4})\.\s*(?:Folge|Teil|Episode)',  # 3. Folge
     r'\((\d{1,4})\)\s*$',                       # (3) am Titelende
-    r'(?<![A-Za-z])E(\d{1,3})(?![A-Za-z\d])',  # E040 / .E040. (kein SxxExx-Prefix nötig)
+    r'(?<![A-Za-z])E(\d{1,4})(?![A-Za-z\d])',  # E040 / E1155 (kein SxxExx-Prefix nötig)
 ]
 
 _SE_RE = re.compile(r'S(\d{1,4})[_. ]?[xE](\d{1,4})', re.IGNORECASE)
 
-# Sender-Präfixe, die beim Erkennen des Seriennamens abgeschnitten werden
+# Sender-Präfixe, die beim Erkennen des Seriennamens abgeschnitten werden.
+#
+# BEWUSST NICHT enthalten: ONE, SUPER, NICK, DISNEY. Das sind zwar Sender,
+# aber viel häufiger die ersten Wörter eines Titels – "ONE" machte aus
+# "One Piece" ein "Piece", "SUPER" aus "Super Mario" ein "Mario". Ein falsch
+# abgeschnittener Serienname führt zu falscher Zuordnung und falschem Ordner;
+# ein nicht abgeschnittenes Senderkürzel kostet dagegen höchstens einen
+# einmaligen Klick im Serien-Picker.
 _CHANNEL_PREFIX_RE = re.compile(
     r'^(?:ARD|ZDF|MDR|NDR|WDR|SWR|BR|HR|RBB|ORF|3SAT|ARTE|PHOENIX|KiKA|'
-    r'RTL|SAT1?|PRO7|VOX|DMAX|TELE5|DISNEY|NICK|SUPER|ONE|FUNK)[ _-]+',
+    r'RTL|SAT1?|PRO7|VOX|DMAX|TELE5|FUNK)[ _-]+',
     re.IGNORECASE)
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".m4v",
@@ -428,7 +435,7 @@ _CUT_PATTERNS = [
     # Die folgenden zwei greifen für die eigenen Downloads dieser App:
     # _series_filename fällt auf "{topic} E{ep} {titel}" bzw.
     # "{topic} S{jahr} {titel}" zurück, wenn Folge/Zeitstempel fehlen.
-    r'(?<![A-Za-z])E\d{1,3}(?![A-Za-z\d])',
+    r'(?<![A-Za-z])E\d{1,4}(?![A-Za-z\d])',
     r'\bS(?:19|20)\d{2}\b(?![xE\d])',
 ]
 _CUT_RE = re.compile("|".join("(?:%s)" % p for p in _CUT_PATTERNS),
@@ -447,6 +454,24 @@ def _with_source_ext(new_name, src_filename):
         return new_name
     base, ext = os.path.splitext(new_name)
     return base + src_ext if ext.lower() != src_ext.lower() else new_name
+
+
+def _abs_map_from_episodes(episodes):
+    """Absolute Folgennummer → (Staffel, Folge) der offiziellen Reihenfolge.
+
+    Wird aus der bereits geladenen offiziellen Liste abgeleitet: alle
+    regulären Folgen (ohne Specials, also Staffel ≥ 1) nach Staffel und
+    Folge sortiert und ab 1 durchnummeriert.
+
+    Der `/episodes/absolute/`-Endpunkt von TheTVDB taugt dafür NICHT – er
+    meldet für jede Folge `seasonNumber: 1` und liefert damit nur eine
+    Identitätsabbildung. Diese Ableitung funktioniert dagegen für alle
+    Quellen gleich und braucht keine zusätzliche Abfrage.
+
+    Beispiel One Piece: Folge 1155 der Dateien → (Staffel, Folge) laut TVDB.
+    """
+    regulaer = sorted(k for k in episodes if k[0] is not None and k[0] >= 1)
+    return {abs_n: k for abs_n, k in enumerate(regulaer, start=1)}
 
 
 def _part_num(filename):
@@ -921,7 +946,8 @@ class TVDBClient:
                         params={"page": page},
                         headers=self._h(), timeout=15)
                     r.raise_for_status()
-                    data = r.json().get("data", {})
+                    payload = r.json()
+                    data = payload.get("data", {})
                     eps  = data.get("episodes", [])
                 except Exception:
                     break
@@ -942,7 +968,11 @@ class TVDBClient:
                     # was als falsy gewertet würde und alle Specials verwirft
                     if s is not None and e and name:
                         result[(s, e)] = name
-                if not data.get("links", {}).get("next"):
+                # ACHTUNG: TheTVDB liefert "links" auf der OBERSTEN Ebene der
+                # Antwort, nicht in "data". Wer in data sucht, findet nie ein
+                # "next" und bricht nach der ersten Seite ab – bei One Piece
+                # wurden so nur 500 von über 1100 Episoden geladen.
+                if not (payload.get("links") or {}).get("next"):
                     break
                 page += 1
             return result
@@ -2776,10 +2806,9 @@ class MediathekDownloader:
             used_order = "official"
         abs_map = {}
         if used_order == "official":
-            try:
-                abs_map = client.build_abs_map(series["id"])
-            except Exception:
-                pass
+            # Aus der offiziellen Liste ableiten – quellenunabhängig, korrekt
+            # und ohne zusätzliche Abfrage (siehe _abs_map_from_episodes).
+            abs_map = _abs_map_from_episodes(episodes)
         serie_name = client.get_series_name(series["id"], lang,
                                            fallback_name=series.get("name", ""))
         serie_name = self._clean_api_series_name(serie_name)
@@ -3486,7 +3515,15 @@ class MediathekDownloader:
         # ── Hilfsfunktionen ──────────────────────────────────────────────────────
 
         def _find_by_ep(ep_num):
-            return sorted((ss, ee) for (ss, ee) in episodes if ee == ep_num)
+            """Alle (Staffel, Folge) mit dieser Folgennummer.
+
+            Staffel 0 (Specials) kommt ans ENDE: eine nackte Folgennummer im
+            Dateinamen meint praktisch immer eine reguläre Folge. Ohne das
+            gewann bei Serien mit Specials die Staffel 0 – bei Dragon Ball Kai
+            landeten so die Folgen 1-9 auf den Buu-Arc-Specials.
+            """
+            return sorted(((ss, ee) for (ss, ee) in episodes if ee == ep_num),
+                          key=lambda k: (k[0] == 0, k[0], k[1]))
 
         _normalize = _normalize_title
 
@@ -3693,6 +3730,17 @@ class MediathekDownloader:
                     matched_s, matched_e = cands[0]
                     ep_title = episodes[(matched_s, matched_e)]
                     match_strategy = 4
+                elif abs_map:
+                    # Strategie 5 auch OHNE Staffelangabe: bei Anime sind die
+                    # Dateien durchgehend nummeriert (One Piece 1155), die
+                    # Datenbank gliedert aber in Staffeln. Ohne diesen Zweig
+                    # blieben alle Folgen jenseits der längsten Staffel ohne
+                    # Treffer.
+                    mapped = abs_map.get(e)
+                    if mapped and episodes.get(mapped):
+                        matched_s, matched_e = mapped
+                        ep_title = episodes[mapped]
+                        match_strategy = 5
 
             se_str = f"S{s}E{e}" if s is not None and e is not None else (f"E{e}" if e else "—")
             debug_lines.append(

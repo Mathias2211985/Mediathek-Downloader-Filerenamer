@@ -369,18 +369,27 @@ _EP_PATTERNS = [
 
 _SE_RE = re.compile(r'S(\d{1,4})[_. ]?[xE](\d{1,4})', re.IGNORECASE)
 
-# Sender-Präfixe, die beim Erkennen des Seriennamens abgeschnitten werden.
+# Senderkürzel – EINE Quelle für beide Regexe unten, damit sie nicht
+# auseinanderlaufen.
 #
 # BEWUSST NICHT enthalten: ONE, SUPER, NICK, DISNEY. Das sind zwar Sender,
-# aber viel häufiger die ersten Wörter eines Titels – "ONE" machte aus
-# "One Piece" ein "Piece", "SUPER" aus "Super Mario" ein "Mario". Ein falsch
-# abgeschnittener Serienname führt zu falscher Zuordnung und falschem Ordner;
-# ein nicht abgeschnittenes Senderkürzel kostet dagegen höchstens einen
-# einmaligen Klick im Serien-Picker.
-_CHANNEL_PREFIX_RE = re.compile(
-    r'^(?:ARD|ZDF|MDR|NDR|WDR|SWR|BR|HR|RBB|ORF|3SAT|ARTE|PHOENIX|KiKA|'
-    r'RTL|SAT1?|PRO7|VOX|DMAX|TELE5|FUNK)[ _-]+',
-    re.IGNORECASE)
+# aber viel häufiger gewöhnliche Wörter in Titeln. "ONE" machte aus
+# "One Piece" ein "Piece", "SUPER" aus dem Episodentitel "Der Super-Roller"
+# ein "Der". Ein falsch beschnittener Name führt zu falscher Zuordnung;
+# ein nicht entferntes Senderkürzel kostet höchstens einen Klick.
+_CHANNELS_RE_SRC = (r'ARD|ZDF|MDR|NDR|WDR|SWR|BR|HR|RBB|ORF|3SAT|ARTE|'
+                    r'PHOENIX|KiKA|RTL|SAT1?|PRO7|VOX|DMAX|TELE5|FUNK')
+
+# Nur am Anfang – für den Seriennamen
+_CHANNEL_PREFIX_RE = re.compile(rf'^(?:{_CHANNELS_RE_SRC})[ _-]+', re.IGNORECASE)
+
+# Überall im Namen – für den Episodentitel
+_CHANNEL_ANY_RE = re.compile(rf'\b(?:{_CHANNELS_RE_SRC})\b', re.IGNORECASE)
+
+# Release-Gruppe am Ende ("-YTS", "-NIMA4K", "-STARS"). Bewusst nur bei
+# GROSSSCHREIBUNG oder Ziffern – sonst verschwindet aus dem echten Titel
+# "Der Super-Roller" das "-Roller".
+_RELEASE_SUFFIX_RE = re.compile(r'[-–]\s*(?=[^a-z\s]{2,}\s*$)\w{2,}\s*$')
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".m4v",
                ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".mts"}
@@ -1015,7 +1024,17 @@ class TVDBClient:
                 return unicodedata.normalize("NFC", (s or "").strip().lower())
 
             for key, name in translated.items():
-                if name and _norm(name) != _norm(orig.get(key, "")):
+                if not name:
+                    continue
+                if key not in result:
+                    # Kein englischer Titel vorhanden → Übersetzung nehmen,
+                    # auch wenn sie dem Original gleicht. Sonst fiele die
+                    # Folge ganz heraus: "Floridor" (Die drei Musketiere)
+                    # heißt auf Deutsch wie auf Französisch gleich und
+                    # verschwand dadurch komplett aus der Liste.
+                    result[key] = name
+                elif _norm(name) != _norm(orig.get(key, "")):
+                    # Echte Übersetzung (weicht vom Original ab) → bevorzugen
                     result[key] = name
 
         return result
@@ -3528,10 +3547,9 @@ class MediathekDownloader:
         _normalize = _normalize_title
 
         # Sendernamen überall im Dateinamen entfernen (nicht nur am Anfang)
-        _channel_any_re = re.compile(
-            r'\b(ARD|ZDF|MDR|NDR|WDR|SWR|BR|HR|RBB|ORF|3SAT|ARTE|PHOENIX|'
-            r'KiKA|RTL|SAT1?|PRO7|VOX|DMAX|TELE5|DISNEY|NICK|SUPER|ONE|FUNK)\b',
-            re.IGNORECASE)
+        # Gemeinsame Senderliste (Modulebene) – enthält bewusst kein
+        # ONE/SUPER/NICK/DISNEY, das sind zu häufig echte Titelwörter
+        _channel_any_re = _CHANNEL_ANY_RE
 
         def _title_from_filename(filename):
             """Extrahiert den Episodentitel-Anteil aus dem Dateinamen."""
@@ -3586,8 +3604,9 @@ class MediathekDownloader:
             name = re.sub(
                 r'\b(?:x264|x265|HEVC|AVC|H\.?264|H\.?265|XviD|DivX)\b',
                 ' ', name, flags=re.IGNORECASE)
-            # Encoder-Suffix am Ende (z.B. "-Waechter", "-YTS")
-            name = re.sub(r'[-–]\s*\w{2,}\s*$', '', name)
+            # Release-Gruppe am Ende (z.B. "-YTS", "-NIMA4K") – nur bei
+            # Grossschreibung/Ziffern, damit "Der Super-Roller" heil bleibt
+            name = _RELEASE_SUFFIX_RE.sub('', name)
             return re.sub(r'\s{2,}', ' ', name).strip(' -–_')
 
         def _best_title_match(candidate):

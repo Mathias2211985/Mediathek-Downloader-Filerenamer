@@ -389,7 +389,10 @@ _CHANNEL_ANY_RE = re.compile(rf'\b(?:{_CHANNELS_RE_SRC})\b', re.IGNORECASE)
 # Release-Gruppe am Ende ("-YTS", "-NIMA4K", "-STARS"). Bewusst nur bei
 # GROSSSCHREIBUNG oder Ziffern – sonst verschwindet aus dem echten Titel
 # "Der Super-Roller" das "-Roller".
-_RELEASE_SUFFIX_RE = re.compile(r'[-–]\s*(?=[^a-z\s]{2,}\s*$)\w{2,}\s*$')
+# Der Anhang muss ausserdem eine Ziffer enthalten ODER mindestens vier Zeichen
+# lang sein – sonst frisst die Regel echte Titelenden wie "Tier-ABC".
+_RELEASE_SUFFIX_RE = re.compile(
+    r'[-–]\s*(?=[^a-z\s]{2,}\s*$)(?=\w*\d|\w{4,})\w{2,}\s*$')
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".m4v",
                ".flv", ".webm", ".mpg", ".mpeg", ".m2ts", ".mts"}
@@ -1038,6 +1041,34 @@ class TVDBClient:
                     result[key] = name
 
         return result
+
+    def get_season_names(self, series_id):
+        """Gibt {Staffelnummer: Staffelname} für benannte Staffeln zurück.
+
+        Bei Rubriken-Sendungen tragen die Staffeln nicht "Staffel 8", sondern
+        den Namen der Rubrik: bei "Unser Sandmännchen" heißt S8 "Jan und
+        Henry", S11 "Der kleine König", S38 "Dr. Brumm". Genau dieser Name
+        steht in den Dateinamen vor dem Episodentitel – darüber lässt sich die
+        Staffel bestimmen, ohne raten zu müssen.
+
+        Bei normalen Serien sind die Staffeln unbenannt; dann kommt ein leeres
+        Ergebnis zurück und der Abgleich läuft unverändert weiter.
+        """
+        try:
+            r = requests.get(f"{self.BASE}/series/{series_id}/extended",
+                             headers=self._h(), timeout=15)
+            r.raise_for_status()
+            seasons = (r.json().get("data") or {}).get("seasons") or []
+        except Exception:
+            return {}
+        namen = {}
+        for s in seasons:
+            if (s.get("type") or {}).get("type") != "official":
+                continue
+            nr, nm = s.get("number"), (s.get("name") or "").strip()
+            if nr is not None and nm:
+                namen[nr] = nm
+        return namen
 
     def build_abs_map(self, series_id):
         """Gibt {abs_ep_num: (season, per_season_ep)} zurück.
@@ -2682,7 +2713,7 @@ class MediathekDownloader:
                 grp = {"gid": gid, "raw": display.get(gid, ""),
                        "state": "UNRESOLVED" if not gid else "NEW",
                        "epoch": 0, "series": None, "candidates": [],
-                       "serie_name": "", "episodes": {}, "abs_map": {},
+                       "serie_name": "", "episodes": {}, "abs_map": {}, "season_names": {},
                        "order": "", "message": ""}
                 self._tvdb_groups[gid] = grp
             grp["n_files"]   = n
@@ -2831,8 +2862,18 @@ class MediathekDownloader:
         serie_name = client.get_series_name(series["id"], lang,
                                            fallback_name=series.get("name", ""))
         serie_name = self._clean_api_series_name(serie_name)
+        # Benannte Staffeln (Rubriken-Sendungen) – nicht jede Quelle kann das,
+        # und ein Fehlschlag darf den Abgleich nie aufhalten.
+        season_names = {}
+        _sn_getter = getattr(client, "get_season_names", None)
+        if _sn_getter:
+            try:
+                season_names = _sn_getter(series["id"]) or {}
+            except Exception:
+                season_names = {}
         payload = {"episodes": episodes, "abs_map": abs_map,
-                   "serie_name": serie_name, "order": used_order}
+                   "serie_name": serie_name, "order": used_order,
+                   "season_names": season_names}
         self._tvdb_api_cache[key] = payload
         return payload
 
@@ -2890,10 +2931,11 @@ class MediathekDownloader:
             grp["state"]   = "FAILED"
             grp["message"] = "Keine Episoden gefunden"
             return False
-        grp["episodes"]   = payload["episodes"]
-        grp["abs_map"]    = payload["abs_map"]
-        grp["serie_name"] = payload["serie_name"]
-        grp["order"]      = payload["order"]
+        grp["episodes"]     = payload["episodes"]
+        grp["abs_map"]      = payload["abs_map"]
+        grp["serie_name"]   = payload["serie_name"]
+        grp["order"]        = payload["order"]
+        grp["season_names"] = payload.get("season_names") or {}
         grp["state"]      = "RESOLVED"
         grp["message"]    = ""
         return True
@@ -3024,7 +3066,8 @@ class MediathekDownloader:
                     self._run_match(
                         client, grp["series"], grp["episodes"], iids, dbg_path,
                         abs_map=grp["abs_map"], serie_name=grp["serie_name"],
-                        debug_sink=debug_lines)
+                        debug_sink=debug_lines,
+                        season_names=grp.get("season_names"))
                     self.root.after(0, self._stamp_group, grp["gid"],
                                     grp["epoch"], iids, token)
                 except Exception as exc:
@@ -3280,6 +3323,9 @@ class MediathekDownloader:
             grp["state"]      = "NEW"
             grp["serie_name"] = ""
             grp["episodes"]   = {}
+            # Staffelnamen gehoeren zur alten Serie und muessen mit weg,
+            # sonst wuerden Rubriken der Vorgaengerserie weiterbenutzt.
+            grp["season_names"] = {}
             grp["n_ok"]       = None
             if remember_var.get():
                 self._remember_series(gid, series)
@@ -3369,7 +3415,7 @@ class MediathekDownloader:
                 del remembered[gid]
                 self._save_watchlist()
         grp.update({"series": None, "candidates": [], "state": "NEW",
-                    "serie_name": "", "episodes": {}, "abs_map": {},
+                    "serie_name": "", "episodes": {}, "abs_map": {}, "season_names": {},
                     "n_ok": None, "message": ""})
         self._reset_group_rows(gid)
         self._redraw_grp_tree()
@@ -3436,7 +3482,7 @@ class MediathekDownloader:
         if grp is None:
             grp = {"gid": gid, "raw": series.get("name", ""), "state": "NEW",
                    "epoch": 0, "series": None, "candidates": [],
-                   "serie_name": "", "episodes": {}, "abs_map": {},
+                   "serie_name": "", "episodes": {}, "abs_map": {}, "season_names": {},
                    "order": "", "message": "", "n_files": 0, "n_adopted": 0}
             self._tvdb_groups[gid] = grp
         grp["series"] = series
@@ -3508,7 +3554,8 @@ class MediathekDownloader:
     #  damit es nur EINEN Weg gibt.)
 
     def _run_match(self, client, series, episodes, target_iids, dbg_path,
-                   abs_map=None, serie_name=None, debug_sink=None):
+                   abs_map=None, serie_name=None, debug_sink=None,
+                   season_names=None):
         fmt        = self.tvdb_fmt_var.get()
         lang       = self.tvdb_lang_var.get()
         if serie_name is None:
@@ -3551,18 +3598,38 @@ class MediathekDownloader:
         # ONE/SUPER/NICK/DISNEY, das sind zu häufig echte Titelwörter
         _channel_any_re = _CHANNEL_ANY_RE
 
-        def _title_from_filename(filename):
-            """Extrahiert den Episodentitel-Anteil aus dem Dateinamen."""
+        def _title_from_filename(filename, raw_serie=""):
+            """Extrahiert den Episodentitel-Anteil aus dem Dateinamen.
+
+            raw_serie ist der Serienname, wie er im Dateinamen steht. Er kann
+            vom Namen der API abweichen ("Unser Sandmännchen" gegenüber
+            "Sandmännchen"); ohne ihn bliebe ein Rest stehen, der den Vergleich
+            verdirbt.
+            """
             name = os.path.splitext(filename)[0]
             name = _fix_mojibake(name)
+            # Deutsches Datum TT.MM.JJJJ – MUSS vor der Punkt-Ersetzung weg,
+            # danach ist es nicht mehr als Datum erkennbar und bliebe als
+            # "22 08" im Vergleichstext stehen.
+            name = re.sub(r'\b\d{1,2}\.\d{1,2}\.(?:19|20)\d{2}\b', ' ', name)
             name = re.sub(r'[_.]', ' ', name)
             # Sender überall entfernen (Präfix und mitten im Namen)
             name = _channel_any_re.sub('', name).strip()
             # Serienname-Präfix entfernen — Jahreszahl in Klammern vorher abschneiden
             serie_clean = re.sub(r'\s*\(\d{4}\)\s*$', '', serie_name).strip()
             safe_serie  = re.escape(re.sub(r'[_.]', ' ', serie_clean).strip())
-            name = re.sub(r'^' + safe_serie + r'\s*[-–]?\s*',
-                          '', name, flags=re.IGNORECASE).strip()
+            # Beide Schreibweisen abräumen – die aus der API und die aus dem
+            # Dateinamen. Längste zuerst, sonst bliebe von "Unser Sandmännchen"
+            # nach dem Strip von "Sandmännchen" ein "Unser" stehen.
+            _varianten = []
+            for _v in (raw_serie, serie_clean):
+                _v = re.sub(r'[_.]', ' ', (_v or '')).strip()
+                if len(_v) >= 3 and _v.lower() not in (x.lower() for x in _varianten):
+                    _varianten.append(_v)
+            _varianten.sort(key=len, reverse=True)
+            for _v in _varianten:
+                name = re.sub(r'^' + re.escape(_v) + r'\s*[-–]?\s*',
+                              '', name, flags=re.IGNORECASE).strip()
             # Jahreszahl in Klammern die nach dem Serienpräfix übrig bleibt entfernen
             # z.B. "Der Bergdoktor (2008)" → nach Strip von "Der Bergdoktor" bleibt "(2008)"
             name = re.sub(r'^\s*\(\d{4}\)\s*[-–]?\s*', '', name).strip()
@@ -3575,6 +3642,15 @@ class MediathekDownloader:
                     safe_short = re.escape(serie_short)
                     name = re.sub(r'^' + safe_short + r'\s*[-–_]?\s*',
                                   '', name, flags=re.IGNORECASE).strip()
+            # Serienname ein ZWEITES Mal am ENDE – manche Mediatheken hängen ihn
+            # nochmal an ("… Blumen haben Namen Unser Sandmännchen 22.08.2026").
+            # Bewusst nur am Ende verankert und nur, wenn genug Titel übrig
+            # bleibt, damit aus "One Piece" nicht "Piece" wird.
+            for _v in _varianten:
+                _ohne_ende = re.sub(r'\s*[-–]?\s*' + re.escape(_v) + r'\s*$',
+                                    '', name, flags=re.IGNORECASE).strip()
+                if len(_ohne_ende) >= 4:
+                    name = _ohne_ende
             # S/E-Tag entfernen (vollständig SxxExx sowie alleinstehende Sxx/Exx-Fragmente)
             name = _SE_RE.sub('', name)
             name = re.sub(r'\bS\d{1,4}\b', '', name)   # z.B. "S2026" ohne E-Teil
@@ -3628,6 +3704,84 @@ class MediathekDownloader:
                     best = (ss, ee, title, ratio)
             return best
 
+        # ── Rubriken-Sendungen (Anthologien) ──────────────────────────────────
+        # Bei Sendungen wie "Unser Sandmännchen" steht im Dateinamen vor dem
+        # Episodentitel die Rubrik ("Der kleine König Eincremen"). Genau diese
+        # Rubriken sind bei TheTVDB die Staffelnamen. Damit lässt sich die
+        # Staffel bestimmen und die Titelsuche darauf einschränken – das ist
+        # enger und damit sicherer als der Abgleich über alle Folgen.
+        _season_by_norm = {}
+        for _nr, _nm in (season_names or {}).items():
+            # Zweite Schreibweise ohne Bindewort, damit "Jan & Henry" im
+            # Dateinamen die Staffel "Jan und Henry" findet ("&" fällt beim
+            # Normalisieren ohnehin weg).
+            for _var in (_nm, re.sub(r'\bund\b', ' ', _nm, flags=re.IGNORECASE)):
+                _n = _normalize(_var)
+                if len(_n) >= 4:
+                    _season_by_norm.setdefault(_n, _nr)
+        # Längste zuerst prüfen, damit "Kallis Lieder" nicht an "Kallis" hängen bleibt
+        _season_norms = sorted(_season_by_norm, key=len, reverse=True)
+
+        def _split_segment(candidate):
+            """Trennt eine Rubrik ab, die bei TheTVDB eine Staffel ist.
+
+            Der Rubrikname muss am Anfang als vollständige Wortfolge stehen.
+            Rückgabe (Staffel, Rest) oder (None, None).
+            """
+            norm = _normalize(candidate)
+            for sn in _season_norms:
+                if norm.startswith(sn + " "):
+                    rest = norm[len(sn):].strip()
+                    if len(rest) >= 3:
+                        return _season_by_norm[sn], rest
+            return None, None
+
+        def _best_in_season(norm_rest, staffel):
+            """Bester Titeltreffer INNERHALB einer Staffel.
+
+            Gibt (beste, zweitbeste_quote) zurück – der Abstand entscheidet,
+            ob still zugeordnet oder zur Prüfung vorgelegt wird.
+            """
+            best  = (None, None, None, 0.0)
+            zweit = 0.0
+            for (ss, ee), title in episodes.items():
+                if ss != staffel:
+                    continue
+                ratio = difflib.SequenceMatcher(
+                    None, norm_rest, _normalize(title)).ratio()
+                if ratio > best[3]:
+                    zweit = best[3]
+                    best  = (ss, ee, title, ratio)
+                elif ratio > zweit:
+                    zweit = ratio
+            return best, zweit
+
+        def _title_as_suffix(candidate):
+            """Episodentitel, der vollständig am ENDE des Kandidaten steht.
+
+            Für Rubriken, die TheTVDB nicht als Staffelname führt
+            ("Kallis Gute-Nacht-Geschichten Kalli-Biene" → Titel "Kalli-Biene").
+            Es gewinnt der LÄNGSTE passende Titel, damit "Dr. Brumm fährt Kanu"
+            nicht zu "fährt Kanu" verkürzt wird. Sehr kurze Titel sind
+            ausgeschlossen, sonst rastet jedes "Die Biene" irgendwo ein.
+            Rückgabe (s, e, titel, eindeutig).
+            """
+            norm = _normalize(candidate)
+            treffer = []
+            for (ss, ee), title in episodes.items():
+                nt = _normalize(title)
+                if len(nt) < 8 and len(nt.split()) < 2:
+                    continue
+                if norm.endswith(" " + nt):
+                    treffer.append((len(nt), ss, ee, title))
+            if not treffer:
+                return None, None, None, False
+            treffer.sort(key=lambda t: (-t[0], t[1], t[2]))
+            laenge = treffer[0][0]
+            gleich = [t for t in treffer if t[0] == laenge]
+            _, ss, ee, title = gleich[0]
+            return ss, ee, title, len(gleich) == 1
+
         # ── Matching-Schleife ─────────────────────────────────────────────────────
 
         updates = []
@@ -3658,9 +3812,48 @@ class MediathekDownloader:
 
             # Strategie 1: Titelvergleich – Episodenname aus dem Dateinamen
             # gegen TheTVDB-Titel abgleichen (Schwellwert 0.60)
-            candidate = _title_from_filename(file_row["filename"])
+            candidate = _title_from_filename(file_row["filename"],
+                                             file_row.get("series_raw") or "")
+
+            # Strategie 6: Rubrik-Präfix, das bei TheTVDB eine Staffel ist.
+            # "Der kleine König Eincremen" → Staffel 11 ist "Der kleine König",
+            # gesucht wird nur noch "Eincremen" innerhalb dieser Staffel.
+            # Greift nur ohne S/E im Dateinamen; Serien mit Nummern bleiben
+            # unberührt.
+            if s is None and e is None and _season_norms:
+                seg_s, seg_rest = _split_segment(candidate)
+                if seg_s is not None:
+                    (bs, be, btitle, bratio), zweit = _best_in_season(
+                        seg_rest, seg_s)
+                    if btitle and bratio >= 0.60:
+                        matched_s, matched_e = bs, be
+                        ep_title       = btitle
+                        match_ratio    = bratio
+                        match_strategy = 6
+                        # Zwei fast gleich gute Titel in derselben Rubrik –
+                        # nicht still entscheiden, sondern vorlegen.
+                        if bratio < 0.95 and (bratio - zweit) < 0.05:
+                            needs_review = True
+
+            # Strategie 7: Der Episodentitel steht vollständig am Ende des
+            # Dateinamens, davor eine Rubrik, die TheTVDB nicht als Staffelname
+            # führt ("Kallis Gute-Nacht-Geschichten Kalli-Biene").
+            # Läuft VOR dem unscharfen Vergleich: ein vollständig enthaltener
+            # Titel ist der bessere Beleg als eine 60-%-Ähnlichkeit irgendwo
+            # in 1400 Folgen.
+            if not ep_title and s is None and e is None:
+                ts, te, ttitle, eindeutig = _title_as_suffix(candidate)
+                if ttitle:
+                    matched_s, matched_e = ts, te
+                    ep_title       = ttitle
+                    match_ratio    = 1.0 if eindeutig else 0.70
+                    match_strategy = 7
+                    # Derselbe Titel in mehreren Staffeln – welche gemeint ist,
+                    # steht nicht im Dateinamen. Nicht raten, vorlegen.
+                    needs_review   = not eindeutig
+
             ms, me, title, ratio = _best_title_match(candidate)
-            if ratio >= 0.60:
+            if not ep_title and ratio >= 0.60:
                 # Wenn der Dateiname eine explizite S/E-Nummer enthält und
                 # Strategie 1 eine ANDERE Episode vorschlägt → prüfe ob
                 # der exakte S/E-Treffer (Strategie 2) existiert.
@@ -3761,6 +3954,14 @@ class MediathekDownloader:
                         ep_title = episodes[mapped]
                         match_strategy = 5
 
+            # Reiner Titeltreffer ohne jede Nummer im Dateinamen: unterhalb
+            # einer klaren Übereinstimmung ist das geraten. Dann lieber
+            # vorlegen als still umbenennen – eine falsch einsortierte Folge
+            # kostet mehr Mühe als eine liegengebliebene.
+            if (ep_title and s is None and e is None
+                    and match_strategy in (1, 6, 7) and match_ratio < 0.85):
+                needs_review = True
+
             se_str = f"S{s}E{e}" if s is not None and e is not None else (f"E{e}" if e else "—")
             debug_lines.append(
                 f"{file_row['filename']:<55} {se_str:<10} {candidate[:28]:<30} "
@@ -3785,7 +3986,7 @@ class MediathekDownloader:
                 if needs_review:
                     tag    = "ok_low"
                     status = f"prüfen {match_ratio*100:.0f}%" + (f" pt{part_num}" if part_num else "")
-                elif match_strategy == 1:
+                elif match_strategy in (1, 6, 7):
                     tag    = "ok_high" if match_ratio >= 0.85 else "ok_mid"
                     status = f"{match_ratio*100:.0f}%"  + (f" pt{part_num}" if part_num else "")
                 else:

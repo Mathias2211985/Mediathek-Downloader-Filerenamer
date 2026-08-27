@@ -66,7 +66,11 @@ LANG_OPTIONS = ["Alle", "Deutsch", "OV (Originalversion)", "OmU (mit UT)", "Sorb
 _OV_TERMS       = ("(ov)", "(originalversion)", "(originalsprache)", "(englisch)",
                    "(englische fassung)", "(of)")
 _OMU_TERMS      = ("(omu)", "(ot)", "(ut)", "mit untertiteln", "mit deutschen untertiteln")
-_ACCESS_TERMS   = ("hörgeschädigte", "gebärdensprache", "hörfassung", "audiodeskription")
+# Auch die Kürzel, nicht nur die ausgeschriebenen Begriffe: die ARD hängt an
+# Hörfassungen nur ein "(AD)" an, an Gebärdensprach-Fassungen "(DGS)".
+_ACCESS_TERMS   = ("hörgeschädigte", "gebärdensprache", "hörfassung",
+                   "audiodeskription", "audiodeskr", "hörfilm",
+                   "(ad)", "(dgs)")
 _MINORITY_TERMS = ("pěskowčik", "hornjoserbski", "dolnoserbski", "sorbisch",
                    "obersorbisch", "niedersorbisch", "hornoso")
 
@@ -6243,7 +6247,6 @@ class MediathekDownloader:
             seen[k] = seen.get(k, 0) + 1
         dup_keys = {k for k, v in seen.items() if v > 1}
 
-        _ACCESS_TERMS = ("hörgeschädigte", "gebärdensprache", "hörfassung", "audiodeskription")
         filter_access = self.filter_access_var.get()
         lang          = self.language_var.get()
 
@@ -7447,7 +7450,6 @@ class MediathekDownloader:
     def _watchlist_check_thread(self, entries):
         all_new_items = []
         folder        = self.wl_folder_var.get()
-        _ACCESS_TERMS = ("hörgeschädigte", "gebärdensprache", "hörfassung", "audiodeskription")
 
         def _parse_min(s):
             s = str(s).strip()
